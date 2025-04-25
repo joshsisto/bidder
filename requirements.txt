@@ -1,0 +1,17 @@
+requests
+pandas
+pillow
+pytesseract
+pyppeteer
+selenium
+selenium-stealth
+undetected-chromedriver
+webdriver-manager
+google-api-python-client
+aiohttp
+fake-useragent
+google-images-search
+beautifulsoup4
+openpyxl
+python-dotenv
+playwright
