@@ -30,7 +30,7 @@ HEADLESS_BROWSER = os.getenv('HEADLESS_BROWSER', 'True').lower() in ('true', '1'
 MAX_ITEMS = 100  # Maximum number of items to process
 NETWORK_TIMEOUT = int(os.getenv('NETWORK_TIMEOUT', '60000'))  # Network timeout in milliseconds
 # AUCTION_URL = "https://www.bidrl.com/auction/high-end-auctions-9415-madison-ave-orangevale-ca-95662-april-25th-173079/bidgallery/perpage_NjA"
-AUCTION_URL = "https://www.bidrl.com/auction/highend-auction-212-harding-blvd-ste-g-roseville-ca-95678-may-2nd-173431/bidgallery/perpage_MTI/page_Mw"
+AUCTION_URL = "https://www.bidrl.com/auction/highend-auction-212-harding-blvd-ste-g-roseville-ca-95678-may-2nd-173431/bidgallery/"
 
 # Search configuration
 ENABLE_AMAZON_SEARCH = os.getenv('ENABLE_AMAZON_SEARCH', 'False').lower() in ('true', '1', 't')
@@ -52,3 +52,8 @@ else:  # Linux/Mac
     
 # OCR configuration
 TESSERACT_CONFIG = r'--oem 3 -l eng --psm 4'  # OCR Engine Mode 3, Page Segmentation Mode 4
+
+# LLM-based search query generation
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', "")
+OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', "anthropic/claude-3-opus-20240229")
+OPENROUTER_ENABLED = os.getenv('OPENROUTER_ENABLED', 'False').lower() in ('true', '1', 't') and OPENROUTER_API_KEY

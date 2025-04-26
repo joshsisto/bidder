@@ -444,104 +444,161 @@ class ProductIdentifier:
             if original_description and 'Lot #' in original_description:
                 original_description = re.sub(r'Lot #.*?:', '', original_description).strip()
             
-            # Start with an empty query
-            query_parts = []
-            query_quality = 0  # Track how good our query is (0-100)
+            # Start with the original item description as the base
+            if not original_description:
+                # Fallback if no original description
+                original_description = item.get('enhanced_description', '')
+                if not original_description:
+                    original_description = ""
             
-            # Add OCR-detected brand and model if available (highest priority)
-            ocr_brands = item.get('ocr_brands', [])
-            ocr_models = item.get('ocr_model_numbers', [])
-            
-            if ocr_brands and ocr_models:
-                query_parts.append(ocr_brands[0].title())
-                query_parts.append(ocr_models[0].upper())
-                query_quality = 90  # Very high quality
-                logger.info("Using OCR-detected brand and model for search query (high confidence)")
-            
-            # If no OCR results, try product_info
-            elif not query_parts:
-                product_info = item.get('product_info', {})
-                has_brand = bool(product_info.get('brand'))
-                has_model = bool(product_info.get('model'))
-                
-                if has_brand and has_model:
-                    query_parts.append(product_info['brand'])
-                    query_parts.append(product_info['model'])
-                    query_quality = 80  # Good quality
-                    logger.info("Using structured product info for search query (good confidence)")
-                elif has_brand:
-                    query_parts.append(product_info['brand'])
-                    
-                    # Add category if available
-                    if product_info.get('category'):
-                        query_parts.append(product_info['category'])
-                    
-                    # Add some keywords from original description
-                    if original_description:
-                        # Use first few words, but not too many
-                        words = original_description.split()
-                        query_parts.append(' '.join(words[:4]))
-                    
-                    query_quality = 60  # Medium quality
-                    logger.info("Using brand and category for search query (medium confidence)")
-            
-            # If we don't have good product info, try object detection
-            if not query_parts or query_quality < 50:
-                detection = item.get('object_detection', {})
-                
-                detected_brands = detection.get('detected_brands', [])
-                model_numbers = detection.get('model_numbers', [])
-                
-                if detected_brands and model_numbers:
-                    # Clear previous parts if this is better
-                    if query_quality < 70:
-                        query_parts = []
-                    
-                    query_parts.append(detected_brands[0])
-                    query_parts.append(model_numbers[0])
-                    query_quality = max(query_quality, 70)
-                    logger.info("Using object detection results for search query")
-                    
-                # Add object type and color for context
-                elif detected_brands:
-                    if query_quality < 50:
-                        query_parts = []
-                        query_parts.append(detected_brands[0])
-                    
-                    # Add detected objects but filter out generic ones
-                    objects = detection.get('detected_objects', [])
-                    good_objects = [obj for obj in objects if obj not in ('tall_item', 'wide_item', 'rectangular_object')]
-                    
-                    if good_objects:
-                        query_parts.append(good_objects[0])
-                    
-                    # Add color if available
-                    if detection.get('colors') and len(detection['colors']) > 0:
-                        query_parts.append(detection['colors'][0])
-                    
-                    query_quality = max(query_quality, 50)
-                    logger.info("Using brand and object type for search query")
-            
-            # Combine query parts - if quality is low, prioritize original description
-            if not query_parts or query_quality < 30:
-                # Use original description as main query when we have no good alternatives
-                logger.info("Using original description as fallback for search query")
-                if original_description:
-                    final_query = original_description
-                else:
-                    final_query = item.get('enhanced_description', '')
-                query_quality = 20
+            # Limit description length to ensure it's not too verbose
+            # But keep most of it since it's the primary information source
+            description_words = original_description.split()
+            if len(description_words) > 15:
+                # Keep first 15 words as they are usually most important
+                base_description = ' '.join(description_words[:15])
             else:
-                # Join all parts with spaces
-                final_query = ' '.join(query_parts)
+                base_description = original_description
                 
-                # Add original description at end if query is still relatively short
-                if len(final_query) < 50 and original_description:
-                    # Use a shortened version of the original description
-                    words = original_description.split()
-                    if len(words) > 5:
-                        additional_desc = ' '.join(words[:5])
-                        final_query += ' ' + additional_desc
+            logger.info(f"Using original item description as search base: {base_description}")
+            
+            # Start building enhancement parts to add to the description
+            enhancement_parts = []
+            
+            # Add OCR-detected models first (highest priority) - these are key identifiers
+            ocr_models = item.get('ocr_model_numbers', [])
+            if ocr_models:
+                # Filter to unique models not already in the description
+                unique_models = []
+                for model in ocr_models:
+                    model_upper = model.upper()
+                    if model_upper not in base_description.upper() and model_upper not in unique_models:
+                        unique_models.append(model_upper)
+                
+                if unique_models:
+                    enhancement_parts.extend(unique_models[:2])  # Add up to 2 model numbers
+                    logger.info(f"Added OCR-detected model numbers: {' '.join(unique_models[:2])}")
+            
+            # Add OCR-detected brands if not already in description
+            ocr_brands = item.get('ocr_brands', [])
+            if ocr_brands:
+                for brand in ocr_brands:
+                    if brand.lower() not in base_description.lower():
+                        enhancement_parts.append(brand.title())
+                        logger.info(f"Added OCR-detected brand: {brand.title()}")
+                        break  # Just add one brand
+            
+            # Add detected brands from object detection if not already covered
+            detection = item.get('object_detection', {})
+            detected_brands = detection.get('detected_brands', [])
+            if detected_brands and not enhancement_parts:  # Only if we don't have enhancements yet
+                for brand in detected_brands:
+                    if brand.lower() not in base_description.lower() and brand.lower() not in [p.lower() for p in enhancement_parts]:
+                        enhancement_parts.append(brand.title())
+                        logger.info(f"Added object-detected brand: {brand.title()}")
+                        break  # Just add one brand
+            
+            # Add model numbers from object detection if not already covered
+            model_numbers = detection.get('model_numbers', [])
+            if model_numbers:
+                for model in model_numbers:
+                    model_upper = model.upper()
+                    if model_upper not in base_description.upper() and model_upper not in [p.upper() for p in enhancement_parts]:
+                        enhancement_parts.append(model_upper)
+                        logger.info(f"Added object-detected model number: {model_upper}")
+                        break  # Just add one model number
+            
+            # Extract category info from structured data
+            product_info = item.get('product_info', {})
+            category = product_info.get('category', '')
+            
+            # Add category if it provides context and isn't already covered
+            if category and category.lower() not in base_description.lower() and category.lower() not in [p.lower() for p in enhancement_parts]:
+                enhancement_parts.append(category)
+                logger.info(f"Added category: {category}")
+            
+            # Check if the base description contains a brand name
+            base_desc_lower = base_description.lower()
+            has_brand_in_description = False
+            brand_in_description = None
+            
+            # First, check against our common brands list
+            common_brands = [
+                'samsung', 'sony', 'apple', 'lg', 'bosch', 'dewalt', 'milwaukee', 
+                'makita', 'craftsman', 'ryobi', 'stanley', 'black and decker', 'black & decker',
+                'kitchenaid', 'whirlpool', 'ge', 'general electric', 'maytag', 'kenmore',
+                'frigidaire', 'philips', 'panasonic', 'toshiba', 'sharp', 'dell', 'hp',
+                'microsoft', 'lenovo', 'asus', 'acer', 'canon', 'nikon', 'gopro',
+                'bose', 'sennheiser', 'jbl', 'sonos', 'klipsch', 'polk', 'pioneer',
+                'yamaha', 'denon', 'vizio', 'insignia', 'nintendo', 'playstation', 'xbox',
+                'dyson', 'shark', 'hoover', 'eureka', 'bissell', 'miele', 'roomba', 'irobot',
+                'nutribullet', 'cuisinart', 'ninja', 'breville', 'calphalon',
+                'coleman', 'weber', 'traeger', 'yeti', 'north face', 'patagonia', 'columbia',
+                'nike', 'adidas', 'under armour', 'new balance', 'puma', 'reebok'
+            ]
+            
+            for brand in common_brands:
+                if re.search(r'\b' + re.escape(brand) + r'\b', base_desc_lower):
+                    has_brand_in_description = True
+                    brand_in_description = brand
+                    logger.info(f"Found brand name in original description: {brand}")
+                    break
+            
+            # Check if the base description contains what looks like a model number already
+            # If so, we'll prioritize the original description even more
+            has_model_in_description = False
+            model_in_description = None
+            for pattern in [
+                r'\b[A-Za-z]{1,4}-\d{2,6}\b',            # ABC-123
+                r'\b[A-Za-z]{2,4}\d{2,4}[A-Za-z]?\b',    # TX550, RTX3080
+                r'\b[A-Z]{2,8}\d{4,8}\b',                # SKGJ5678 (SKU-like)
+                r'\bmodel[:\s]+([a-z0-9\-]{3,15})\b',    # Model: ABC123
+                r'\bpart[:\s#]+([a-z0-9\-]{3,15})\b',    # Part#: ABC123
+                r'\b(?:serial|s/n)[:\s#]+([a-z0-9\-]{3,15})\b',    # Serial: ABC123
+                r'\b(?:model|mod|mdl)[:\s#]+([a-z0-9\-]{3,15})\b', # Mod: ABC123
+            ]:
+                match = re.search(pattern, base_description, re.IGNORECASE)
+                if match:
+                    has_model_in_description = True
+                    model_in_description = match.group(0)
+                    logger.info(f"Found model/serial pattern in original description: {model_in_description}")
+                    break
+                    
+            # If we have both brand and model in description, it's likely very accurate already
+            if has_brand_in_description and has_model_in_description:
+                logger.info("Original description contains both brand and model - very high quality")
+                # Check if we can extract just the essential parts for a more focused query
+                try:
+                    # Try to construct a focused query with just brand + model
+                    focused_query = f"{brand_in_description} {model_in_description}"
+                    if len(focused_query) > 10:  # Make sure it's substantial
+                        logger.info(f"Created focused brand+model query: {focused_query}")
+                        base_description = focused_query
+                except Exception as e:
+                    logger.error(f"Error creating focused query: {e}")
+                    # Continue with the full description
+            
+            # Combine the base description with enhancements
+            if has_model_in_description:
+                # If description already has model info, only add brand info if available 
+                # and keep description as the main focus
+                brand_parts = [p for p in enhancement_parts if p.lower() in [b.lower() for b in ocr_brands + detected_brands]]
+                if brand_parts:
+                    # Add just the brand before the description
+                    final_query = ' '.join(brand_parts[:1]) + ' ' + base_description
+                    logger.info("Original description has model number - adding only brand enhancement")
+                else:
+                    # Use description as is since it already has model info
+                    final_query = base_description
+                    logger.info("Using original description with model number as is")
+            elif enhancement_parts:
+                # Put enhancements first for better searching, followed by description
+                final_query = ' '.join(enhancement_parts) + ' ' + base_description
+                logger.info("Using enhanced search query with original description")
+            else:
+                # If no enhancements, just use the original description
+                final_query = base_description
+                logger.info("Using original description without enhancements")
             
             # Add product category for context if available and not already there
             product_info = item.get('product_info', {})

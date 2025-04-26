@@ -218,69 +218,144 @@ class ObjectDetector:
             results = {
                 'objects': [],
                 'colors': [],
-                'confidence': 0.0
+                'confidence': 0.0,
+                'text': []
             }
+            
+            # Resize image if it's too large
+            max_dim = 1500
+            h, w = cv_image.shape[:2]
+            if max(h, w) > max_dim:
+                # Calculate new dimensions while preserving aspect ratio
+                if h > w:
+                    new_h, new_w = max_dim, int(w * max_dim / h)
+                else:
+                    new_h, new_w = int(h * max_dim / w), max_dim
+                cv_image = cv2.resize(cv_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            # Crop off bottom 5% of the image to remove auction info
+            h, w = cv_image.shape[:2]
+            crop_height = int(h * 0.95)  # Remove bottom 5%
+            cv_image = cv_image[0:crop_height, 0:w]
             
             # Get dominant colors using OpenCV
             # Convert to HSV for better color detection
             img_hsv = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
             
-            # Create color histogram
-            hist = cv2.calcHist([img_hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
-            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+            # Create color histogram - using K-means for more accurate color detection
+            pixels = cv_image.reshape((-1, 3))
+            pixels = np.float32(pixels)
             
-            # Find the most dominant colors
-            num_colors = 3
-            hist = hist.reshape(-1)
-            indices = (-hist).argsort()[:num_colors]
+            # Define criteria for K-means
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+            k = 5  # Number of dominant colors to extract
             
-            for idx in indices:
-                # Convert back to spatial coordinates
-                h = idx // 256
-                s = idx % 256
-                
-                # Create an HSV color with these values
-                hsv_color = np.uint8([[[h, s, 255]]])
-                rgb_color = cv2.cvtColor(hsv_color, cv2.COLOR_HSV2RGB)[0][0]
+            _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+            
+            # Get the most dominant colors - centers represent RGB colors
+            # Count pixels in each cluster
+            count = np.bincount(labels.flatten())
+            # Sort clusters by size (most dominant first)
+            color_indices = np.argsort(-count)
+            
+            # Get top 3 colors
+            for i in range(min(3, len(color_indices))):
+                center = centers[color_indices[i]]
+                rgb_color = center[::-1]  # Convert BGR to RGB
                 
                 # Get color name
                 color_name = ObjectDetector._get_color_name(rgb_color[0], rgb_color[1], rgb_color[2])
                 if color_name:
                     results['colors'].append(color_name)
             
-            # Get image dimensions
+            # Get image dimensions for shape analysis
             height, width = cv_image.shape[:2]
+            aspect_ratio = width / float(height) if height > 0 else 0
             
-            # We could load a pre-trained object detection model here
-            # For simplicity, we'll just return basic dimensions info
-            if width > height:
+            # Categorize object shape by aspect ratio
+            if aspect_ratio > 1.5:
                 results['objects'].append('wide_item')
-            else:
+            elif aspect_ratio < 0.67:
                 results['objects'].append('tall_item')
-                
-            # Detect if the image has mostly simple shapes
-            edges = cv2.Canny(cv_image, 100, 200)
-            contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            else:
+                results['objects'].append('square_item')
             
-            # If we have contours, look for rectangular objects (often electronics)
-            if len(contours) > 10:
-                for contour in contours:
-                    # Approximate contour to simplify shape
-                    epsilon = 0.02 * cv2.arcLength(contour, True)
-                    approx = cv2.approxPolyDP(contour, epsilon, True)
+            # Detect edges and contours
+            gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blurred, 50, 150)
+            
+            # Morphological operations to close gaps
+            kernel = np.ones((3, 3), np.uint8)
+            closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+            
+            # Find contours
+            contours, hierarchy = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Analyze contours by shape
+            rectangles = 0
+            circles = 0
+            triangles = 0
+            irregular = 0
+            
+            for contour in contours:
+                # Filter out very small contours
+                area = cv2.contourArea(contour)
+                if area < (width * height * 0.01):  # Less than 1% of image
+                    continue
+                
+                # Approximate contour to get shape
+                epsilon = 0.04 * cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                
+                # Classify by number of vertices
+                if len(approx) == 4:
+                    # Check if it's rectangular
+                    x, y, w, h = cv2.boundingRect(contour)
+                    aspect_ratio = w / float(h)
                     
-                    # If it has 4 corners, it might be a rectangular object
-                    if len(approx) == 4:
-                        # Check if it's large enough to be significant
-                        area = cv2.contourArea(contour)
-                        if area > (width * height * 0.05):  # At least 5% of image
-                            results['objects'].append('rectangular_object')
-                            break
+                    # If it's a rectangle that is not too elongated
+                    if 0.5 < aspect_ratio < 2.0:
+                        rectangles += 1
+                    
+                elif len(approx) == 3:
+                    triangles += 1
+                    
+                elif len(approx) >= 8:
+                    # Potential circle - check roundness
+                    (x, y), radius = cv2.minEnclosingCircle(contour)
+                    circle_area = np.pi * radius ** 2
+                    if abs(area / circle_area - 1) < 0.2:  # Within 20% of perfect circle
+                        circles += 1
+                else:
+                    irregular += 1
+            
+            # Add shape-based objects
+            if rectangles > 2:
+                results['objects'].append('electronic_device')
+            if circles > 3:
+                results['objects'].append('mechanical_object')
+            if triangles > 2:
+                results['objects'].append('structured_object')
+            
+            # Texture analysis - check if item is shiny/metallic
+            gray_variance = np.var(gray)
+            if gray_variance > 3000:  # High variance often indicates shiny objects
+                results['objects'].append('reflective_object')
+            
+            # Check for text-rich images
+            # Use simple edge density in regions as a proxy
+            edge_density = np.sum(edges) / (edges.shape[0] * edges.shape[1])
+            if edge_density > 0.1:  # Threshold determined empirically
+                results['objects'].append('text_heavy_object')
+            
+            # Additional image features can be added here
             
             return results
             
         except Exception as e:
             logger.error(f"Error with OpenCV detection: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     @staticmethod
@@ -404,15 +479,17 @@ class ObjectDetector:
         if not lot_id:
             lot_id = f"unknown_{int(time.time())}"
         
-        # Process each image
-        for i, img_url in enumerate(images):
+        # Process each image, excluding the last one
+        images_for_detection = images[:-1] if len(images) > 1 else images
+        
+        for i, img_url in enumerate(images_for_detection):
             try:
                 # Generate the local image path
                 image_filepath = generate_image_filepath(lot_id, i+1)
                 
                 # Only analyze if file exists
                 if os.path.exists(image_filepath):
-                    logger.info(f"Analyzing image {i+1}/{len(images)} for object detection")
+                    logger.info(f"Analyzing image {i+1}/{len(images_for_detection)} for object detection")
                     
                     # Detect objects in the image
                     results = await ObjectDetector.detect_objects_in_image(image_filepath, img_url)

@@ -40,10 +40,24 @@ class ReportGenerator:
                 # Format the image URLs as a string
                 image_urls = ', '.join(item.get('images', []))
                 
+                # Extract LLM product information if available
+                llm_info = item.get('llm_product_info', {})
+                llm_product_info = ""
+                if llm_info:
+                    # Format the LLM product info as a string
+                    product_type = llm_info.get('product_type', 'Unknown')
+                    brand = llm_info.get('brand', 'Unknown')
+                    model = llm_info.get('model', 'Unknown')
+                    attributes = llm_info.get('attributes', 'N/A')
+                    
+                    llm_product_info = f"{brand} {model} ({product_type}) - {attributes}"
+                
                 data.append({
                     'Lot Number': item.get('lotNumber', ''),
                     'Description': item.get('description', ''),
                     'Enhanced Description': item.get('enhanced_description', ''),
+                    'LLM Product Info': llm_product_info,
+                    'Used Search Query': item.get('used_search_query', ''),
                     'Current Bid': current_bid,
                     'Market Price': market_price,
                     'Potential Profit': potential_profit,

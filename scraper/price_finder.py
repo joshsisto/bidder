@@ -13,9 +13,10 @@ import asyncio
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
 
-from config import GOOGLE_API_KEY, GOOGLE_CX, ENABLE_AMAZON_SEARCH, HTML_DIR, USE_GOOGLE_API
+from config import GOOGLE_API_KEY, GOOGLE_CX, ENABLE_AMAZON_SEARCH, HTML_DIR, USE_GOOGLE_API, OPENROUTER_ENABLED
 from utils.logger import setup_logger
 from utils.file_utils import save_html
+from scraper.llm_query_generator import LLMQueryGenerator
 
 # Set up logger
 logger = setup_logger("PriceFinder")
@@ -432,18 +433,53 @@ class PriceFinder:
     async def get_best_market_price(self, item):
         """Get the best market price from multiple sources"""
         try:
-            # Start with the final search query if available
-            if item.get('final_search_query'):
-                search_query = item['final_search_query']
-                logger.info(f"Using final search query: {search_query}")
-            # Fall back to rich search query from object detection
-            elif item.get('rich_search_query'):
-                search_query = item['rich_search_query']
-                logger.info(f"Using rich search query: {search_query}")
-            # Last resort - use enhanced description or original
-            else:
-                search_query = item.get('enhanced_description', '') or item.get('description', '')
-                logger.info(f"Using enhanced description as search query")
+            search_query = None
+            amazon_query = None
+            google_query = None
+            
+            # First, try to use LLM-generated queries if available and enabled
+            if OPENROUTER_ENABLED:
+                logger.info(f"Trying LLM-based search query generation for item: {item.get('lotNumber', 'Unknown')}")
+                try:
+                    llm_results = await LLMQueryGenerator.generate_search_query(item)
+                    
+                    if llm_results and "error" not in llm_results:
+                        # Store the identified product information
+                        item['llm_product_info'] = {
+                            'product_type': llm_results.get('product_type', 'Unknown'),
+                            'brand': llm_results.get('brand', 'Unknown'),
+                            'model': llm_results.get('model', 'Unknown'),
+                            'attributes': llm_results.get('attributes', 'N/A')
+                        }
+                        
+                        # Get the generated search queries
+                        google_query = llm_results.get('google_query')
+                        amazon_query = llm_results.get('amazon_query')
+                        
+                        if google_query:
+                            search_query = google_query
+                            logger.info(f"Using LLM-generated Google query: {search_query}")
+                        
+                        # Log the identified product info
+                        logger.info(f"LLM identified: {llm_results.get('brand')} {llm_results.get('model')} ({llm_results.get('product_type')})")
+                    else:
+                        if "error" in llm_results:
+                            logger.warning(f"LLM query generation error: {llm_results['error']}")
+                except Exception as e:
+                    logger.error(f"Error during LLM query generation: {e}")
+            
+            # If LLM didn't produce a query, fall back to traditional methods
+            if not search_query:
+                # Try various existing query options in order of preference
+                if item.get('final_search_query'):
+                    search_query = item['final_search_query']
+                    logger.info(f"Using final search query: {search_query}")
+                elif item.get('rich_search_query'):
+                    search_query = item['rich_search_query']
+                    logger.info(f"Using rich search query: {search_query}")
+                else:
+                    search_query = item.get('enhanced_description', '') or item.get('description', '')
+                    logger.info(f"Using enhanced description as search query")
             
             if not search_query:
                 logger.warning(f"No search query available for item: {item.get('lotNumber', 'Unknown')}")
@@ -451,15 +487,19 @@ class PriceFinder:
                     
             logger.info(f"Researching market price for item: {item.get('lotNumber', 'Unknown')}")
             
-            # Try to use product info to improve pricing
-            product_info = item.get('product_info', {})
-            category = product_info.get('category', '')
-            confidence = product_info.get('confidence', 0.0)
+            # Try to use product info to improve pricing if not using LLM query
+            if not OPENROUTER_ENABLED or "error" in item.get('llm_product_info', {}):
+                product_info = item.get('product_info', {})
+                category = product_info.get('category', '')
+                confidence = product_info.get('confidence', 0.0)
+                
+                # If we have high confidence product info, add category to search
+                if confidence > 0.6 and category and category not in search_query.lower():
+                    search_query = f"{search_query} {category}"
+                    logger.info(f"Enhanced search query with category: {search_query}")
             
-            # If we have high confidence product info, add category to search
-            if confidence > 0.6 and category and category not in search_query.lower():
-                search_query = f"{search_query} {category}"
-                logger.info(f"Enhanced search query with category: {search_query}")
+            # Store the final search query used
+            item['used_search_query'] = search_query
                 
             # Try Google first
             google_price = await self.search_google_for_price(search_query)
@@ -468,7 +508,9 @@ class PriceFinder:
             amazon_price = None
             if (not google_price or google_price == 0) and ENABLE_AMAZON_SEARCH:
                 logger.info("Google search yielded no results, trying Amazon...")
-                amazon_price = await self.search_amazon_for_price(search_query)
+                # Use the Amazon-specific query if available from LLM
+                amazon_search_query = amazon_query if amazon_query else search_query
+                amazon_price = await self.search_amazon_for_price(amazon_search_query)
             elif not ENABLE_AMAZON_SEARCH:
                 logger.info("Amazon search is disabled, skipping")
                 

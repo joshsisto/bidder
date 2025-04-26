@@ -21,6 +21,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `NETWORK_TIMEOUT=60000`: Network timeout in milliseconds
   - `USE_GOOGLE_API=True/False`: Use Google Custom Search API (requires API key)
   - `ENABLE_AMAZON_SEARCH=True/False`: Enable Amazon product search
+  - `OPENROUTER_ENABLED=True/False`: Enable LLM-based search query generation
+  - `OPENROUTER_API_KEY=yourapikey`: Your OpenRouter API key
+  - `OPENROUTER_MODEL=anthropic/claude-3-opus-20240229`: LLM model to use (default is Claude Opus)
 - **Tests**: Currently no test framework implemented
 
 ## Code Style Guidelines

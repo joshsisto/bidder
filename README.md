@@ -20,6 +20,9 @@ auction_bot/
 │   ├── auction_bot.py       # Main AuctionBot class
 │   ├── item_extractor.py    # Item detail extraction
 │   ├── image_processor.py   # Image processing and OCR
+│   ├── object_detector.py   # Object and brand detection
+│   ├── llm_query_generator.py # LLM-based search query generation
+│   ├── product_identifier.py  # Product identification
 │   └── price_finder.py      # Price research (Google, Amazon)
 │
 └── analyzer/
@@ -31,6 +34,8 @@ auction_bot/
 
 - Scrapes auction websites to extract item details
 - Processes images with OCR to enhance item descriptions
+- Performs object detection and brand recognition
+- Uses LLM-based analysis to generate optimized search queries
 - Searches Google and Amazon for market prices
 - Calculates potential profit margins
 - Generates detailed Excel reports
@@ -77,12 +82,19 @@ python -m playwright install
 Edit `config.py` to set your preferences:
 
 - `HOME_IP`: Your home IP address to verify VPN is active
+- `ENABLE_VPN_CHECK`: Enable/disable VPN verification
+- `HEADLESS_BROWSER`: Run browser in headless mode (recommended for servers)
 - `MAX_ITEMS`: Maximum number of items to process
 - `AUCTION_URL`: URL of the auction to scrape
 - `ENABLE_AMAZON_SEARCH`: Enable/disable Amazon price searches
+- `USE_GOOGLE_API`: Use Google API instead of fallback search
 - `GOOGLE_API_KEY`: Your Google API key
 - `GOOGLE_CX`: Your Google Custom Search Engine ID
+- `OBJECT_DETECTION_ENABLED`: Enable/disable advanced object detection
 - `TESSERACT_PATH`: Path to Tesseract OCR executable
+- `OPENROUTER_ENABLED`: Enable LLM-based search query generation
+- `OPENROUTER_API_KEY`: Your OpenRouter API key
+- `OPENROUTER_MODEL`: LLM model to use for search query generation
 
 ## Usage
 

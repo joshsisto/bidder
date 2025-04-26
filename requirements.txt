@@ -17,3 +17,7 @@ python-dotenv
 playwright
 opencv-python
 numpy
+json5
+aiohttp
+asyncio
+regex
