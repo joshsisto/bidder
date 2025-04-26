@@ -5,12 +5,15 @@ Price research functionality for auction items
 import re
 import time
 import random
+import json
 import requests
 import traceback
+import aiohttp
+import asyncio
 from bs4 import BeautifulSoup
-from googleapiclient.discovery import build
+from urllib.parse import quote_plus
 
-from config import GOOGLE_API_KEY, GOOGLE_CX, ENABLE_AMAZON_SEARCH, HTML_DIR
+from config import GOOGLE_API_KEY, GOOGLE_CX, ENABLE_AMAZON_SEARCH, HTML_DIR, USE_GOOGLE_API
 from utils.logger import setup_logger
 from utils.file_utils import save_html
 
@@ -23,6 +26,7 @@ class PriceFinder:
     def __init__(self):
         """Initialize the price finder with a User-Agent generator"""
         self.ua = self._get_user_agent()
+        self.search_session = None
     
     def _get_user_agent(self):
         """Get a random user agent"""
@@ -47,8 +51,92 @@ class PriceFinder:
         except ValueError:
             return 0.0
     
-    def search_google_for_price(self, query):
-        """Search Google for prices of the item"""
+    async def _fallback_google_search(self, query):
+        """
+        Simpler fallback approach for Google search when the API fails
+        Uses a direct search URL and scrapes results
+        """
+        try:
+            logger.info(f"Using fallback Google search for: {query}")
+            
+            # Simplify the query
+            simple_query = query.split()[:5]  # Use only first 5 words
+            simple_query = ' '.join(simple_query) + " price"
+            
+            # Create a search URL
+            search_url = f"https://www.google.com/search?q={quote_plus(simple_query)}"
+            
+            # Set up headers to look like a browser
+            headers = {
+                'User-Agent': self.ua.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://www.google.com/',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            
+            # Initialize a session if needed
+            if not self.search_session:
+                self.search_session = aiohttp.ClientSession()
+            
+            async with self.search_session.get(search_url, headers=headers, timeout=30) as response:
+                if response.status != 200:
+                    logger.warning(f"Fallback Google search failed: HTTP {response.status}")
+                    return None
+                
+                html_content = await response.text()
+            
+            # Parse HTML
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Look for price patterns in the page
+            # Common price patterns
+            price_patterns = [
+                r'\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)',  # $123,456.78
+                r'(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)(?:\s?USD|\s?dollars|\s?\$)',  # 123,456.78 USD
+                r'Price[:;]\s*\$?(\d+(?:\.\d{1,2})?)',  # Price: $123.45 or Price: 123.45
+                r'(\d+(?:\.\d{1,2})?)(?:\s?USD|\s?dollars|\s?\$)',  # Simple price like 123.45 USD
+            ]
+            
+            prices = []
+            page_text = soup.get_text()
+            
+            # Extract all prices from the page
+            for pattern in price_patterns:
+                matches = re.findall(pattern, page_text)
+                for match in matches:
+                    # If match is a tuple (from regex groups), use the first item
+                    if isinstance(match, tuple) and match:
+                        match = match[0]
+                        
+                    price = self.clean_price_string(match)
+                    if price > 0 and price < 10000:  # Filter unrealistic prices
+                        prices.append(price)
+            
+            if prices:
+                # Filter outliers
+                if len(prices) > 3:
+                    prices.sort()
+                    prices = prices[1:-1]  # Remove highest and lowest
+                
+                # Calculate median
+                prices.sort()
+                median_price = prices[len(prices) // 2]
+                logger.info(f"Found median price from fallback Google search: ${median_price}")
+                return median_price
+            else:
+                logger.warning("No prices found in fallback Google search")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in fallback Google search: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+    
+    async def search_google_for_price(self, query):
+        """Search Google for prices of the item - using custom search API or fallback"""
         try:
             # Clean up the query to remove lot numbers and irrelevant information
             clean_query = query
@@ -67,26 +155,50 @@ class PriceFinder:
             
             logger.info(f"Searching Google for price of: {clean_query}")
             
-            # Check if API keys are provided
-            if not GOOGLE_API_KEY or not GOOGLE_CX:
-                logger.warning("Google API key or CX ID not provided. Skipping Google search.")
-                return None
+            # Check if we should use the Google API
+            if not USE_GOOGLE_API:
+                logger.info("Google API not enabled or missing credentials. Using fallback search.")
+                return await self._fallback_google_search(clean_query)
             
-            # Build the search service with proper cache settings
-            service = build("customsearch", "v1", 
-                           developerKey=GOOGLE_API_KEY,
-                           cache_discovery=False)  # Avoid file_cache warning
+            # Build the URL - using direct API to avoid problems with the SDK
+            # Make sure query is not too long (Google has length limits)
+            if len(clean_query) > 100:
+                clean_query = clean_query[:100]
             
-            # Execute the search with proper error handling
+            search_query = f"{clean_query} price"
+            
+            # Properly encode parameters to avoid invalid argument errors
+            params = {
+                'key': GOOGLE_API_KEY,
+                'cx': GOOGLE_CX,
+                'q': search_query,
+                'num': 5
+            }
+            
+            # Construct the URL with proper URL encoding
+            url = "https://www.googleapis.com/customsearch/v1?" + "&".join(f"{k}={quote_plus(str(v))}" for k, v in params.items())
+            
+            # Initialize a session if needed
+            if not self.search_session:
+                self.search_session = aiohttp.ClientSession()
+            
+            # Log the URL for debugging (remove in production)
+            logger.debug(f"Google API request URL: {url}")
+            
             try:
-                result = service.cse().list(
-                    q=f"{clean_query} price", 
-                    cx=GOOGLE_CX, 
-                    num=5
-                ).execute()
-            except Exception as api_error:
-                logger.error(f"Google API request failed: {api_error}")
-                return None
+                async with self.search_session.get(url, timeout=30) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Google API request failed: Status {response.status}")
+                        logger.error(f"Error response: {error_text}")
+                        logger.error(f"Search query was: {search_query}")
+                        # Try a simpler approach as fallback
+                        return await self._fallback_google_search(clean_query)
+                    
+                    result = await response.json()
+            except Exception as e:
+                logger.error(f"Exception during Google API request: {e}")
+                return await self._fallback_google_search(clean_query)
             
             if "items" not in result:
                 logger.warning("No items found in Google search results")
@@ -139,12 +251,9 @@ class PriceFinder:
         except Exception as e:
             logger.error(f"Error searching Google for price: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            
-            # Fall back to Amazon search
-            logger.info("Falling back to Amazon search...")
             return None
     
-    def search_amazon_for_price(self, query):
+    async def search_amazon_for_price(self, query):
         """Search Amazon for price using direct HTTP requests"""
         try:
             # Clean up the query to remove lot numbers and irrelevant information
@@ -165,7 +274,7 @@ class PriceFinder:
             logger.info(f"Searching Amazon for price of: {clean_query}")
             
             # Add random delay to avoid rate limiting
-            time.sleep(random.uniform(1, 3))
+            await asyncio.sleep(random.uniform(1, 3))
             
             headers = {
                 'User-Agent': self.ua.random,
@@ -182,18 +291,22 @@ class PriceFinder:
             url = f"https://www.amazon.com/s?k={clean_query.replace(' ', '+')}"
             logger.debug(f"Amazon search URL: {url}")
             
-            # Make the request with timeout
-            response = requests.get(url, headers=headers, timeout=10)
+            # Initialize a session if needed
+            if not self.search_session:
+                self.search_session = aiohttp.ClientSession()
             
-            if response.status_code != 200:
-                logger.error(f"Amazon search failed: HTTP {response.status_code}")
-                return None
+            async with self.search_session.get(url, headers=headers, timeout=30) as response:
+                if response.status != 200:
+                    logger.error(f"Amazon search failed: HTTP {response.status}")
+                    return None
                 
+                html_content = await response.text()
+            
             # Parse HTML
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser')
             
             # Save Amazon response for debugging
-            save_html(response.text, f"amazon_search_{clean_query[:20]}")
+            save_html(html_content, f"amazon_search_{clean_query[:20]}")
             
             # Look for price elements
             prices = []
@@ -256,10 +369,27 @@ class PriceFinder:
             mid_value_keywords = ['quality', 'leather', 'wireless', 'bluetooth', 'digital', 'stainless']
             low_value_keywords = ['basic', 'simple', 'mini', 'small', 'plastic']
             
-            # Default base price
-            base_price = 25.0
+            # Use detected category and brands to improve estimation
+            category_base_prices = {
+                'electronics': 100.0,
+                'furniture': 120.0,
+                'appliances': 150.0,
+                'tools': 80.0,
+                'jewelry': 200.0,
+                'art': 150.0,
+                'clothing': 40.0,
+                'sports': 75.0,
+                '': 50.0  # Default
+            }
             
-            # Adjust based on keywords
+            # Brand value modifiers
+            premium_brands = ['sony', 'samsung', 'apple', 'dyson', 'bose', 'microsoft']
+            budget_brands = ['rca', 'onn', 'bestbuy', 'insignia']
+            
+            # Default base price (fallback)
+            base_price = 50.0
+            
+            # Adjust based on keywords and complexity of description
             for keyword in high_value_keywords:
                 if keyword in lower_desc:
                     base_price += 50.0
@@ -275,6 +405,20 @@ class PriceFinder:
                     base_price -= 5.0
                     logger.debug(f"Subtracted low-value keyword penalty for: {keyword}")
             
+            # Size/quantity adjustments
+            if re.search(r'set of \d+', lower_desc) or re.search(r'\d+ piece', lower_desc):
+                base_price *= 1.5
+                logger.debug("Added multi-piece bonus")
+            
+            # Number modifiers
+            number_match = re.search(r'(\d+)(?:"|inch|in)', lower_desc)
+            if number_match:
+                # Adjust price based on size (e.g., TV inches)
+                size = int(number_match.group(1))
+                if size > 32:  # If something is over 32 inches, it's likely valuable
+                    base_price += (size - 32) * 5
+                    logger.debug(f"Added size bonus for {size} inches")
+            
             # Ensure minimum reasonable price
             estimated_price = max(base_price, 10.0)
             
@@ -285,34 +429,67 @@ class PriceFinder:
             logger.error(f"Error estimating price from description: {e}")
             return 25.0  # Default fallback price
     
-    def get_best_market_price(self, item):
+    async def get_best_market_price(self, item):
         """Get the best market price from multiple sources"""
-        search_query = item.get('enhanced_description', '') or item.get('description', '')
-        if not search_query:
-            logger.warning(f"No search query available for item: {item.get('lotNumber', 'Unknown')}")
-            return 0.0
+        try:
+            # Start with the final search query if available
+            if item.get('final_search_query'):
+                search_query = item['final_search_query']
+                logger.info(f"Using final search query: {search_query}")
+            # Fall back to rich search query from object detection
+            elif item.get('rich_search_query'):
+                search_query = item['rich_search_query']
+                logger.info(f"Using rich search query: {search_query}")
+            # Last resort - use enhanced description or original
+            else:
+                search_query = item.get('enhanced_description', '') or item.get('description', '')
+                logger.info(f"Using enhanced description as search query")
+            
+            if not search_query:
+                logger.warning(f"No search query available for item: {item.get('lotNumber', 'Unknown')}")
+                return 0.0
+                    
+            logger.info(f"Researching market price for item: {item.get('lotNumber', 'Unknown')}")
+            
+            # Try to use product info to improve pricing
+            product_info = item.get('product_info', {})
+            category = product_info.get('category', '')
+            confidence = product_info.get('confidence', 0.0)
+            
+            # If we have high confidence product info, add category to search
+            if confidence > 0.6 and category and category not in search_query.lower():
+                search_query = f"{search_query} {category}"
+                logger.info(f"Enhanced search query with category: {search_query}")
                 
-        logger.info(f"Researching market price for item: {item.get('lotNumber', 'Unknown')}")
-            
-        # Try Google first
-        google_price = self.search_google_for_price(search_query)
-            
-        # Try Amazon as fallback if enabled
-        amazon_price = None
-        if (not google_price or google_price == 0) and ENABLE_AMAZON_SEARCH:
-            logger.info("Google search yielded no results, trying Amazon...")
-            amazon_price = self.search_amazon_for_price(search_query)
-        elif not ENABLE_AMAZON_SEARCH:
-            logger.info("Amazon search is disabled, skipping")
-            
-        # Use the best available price
-        if google_price and google_price > 0:
-            logger.info(f"Using Google price: ${google_price}")
-            return google_price
-        elif amazon_price and amazon_price > 0:
-            logger.info(f"Using Amazon price: ${amazon_price}")
-            return amazon_price
-        else:
-            logger.warning(f"No price found for: {search_query[:50]}...")
-            # Use fallback price estimation
-            return self.estimate_price_from_description(search_query)
+            # Try Google first
+            google_price = await self.search_google_for_price(search_query)
+                
+            # Try Amazon as fallback if enabled
+            amazon_price = None
+            if (not google_price or google_price == 0) and ENABLE_AMAZON_SEARCH:
+                logger.info("Google search yielded no results, trying Amazon...")
+                amazon_price = await self.search_amazon_for_price(search_query)
+            elif not ENABLE_AMAZON_SEARCH:
+                logger.info("Amazon search is disabled, skipping")
+                
+            # Use the best available price
+            if google_price and google_price > 0:
+                logger.info(f"Using Google price: ${google_price}")
+                return google_price
+            elif amazon_price and amazon_price > 0:
+                logger.info(f"Using Amazon price: ${amazon_price}")
+                return amazon_price
+            else:
+                logger.warning(f"No price found for: {search_query[:50]}...")
+                # Use fallback price estimation
+                return self.estimate_price_from_description(search_query)
+        except Exception as e:
+            logger.error(f"Error in get_best_market_price: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return 25.0  # Default fallback price
+    
+    async def close(self):
+        """Close the search session"""
+        if self.search_session:
+            await self.search_session.close()
+            self.search_session = None

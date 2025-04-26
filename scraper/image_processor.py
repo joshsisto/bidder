@@ -36,20 +36,58 @@ class ImageProcessor:
         if not images:
             logger.warning(f"No images to process for item: {item.get('lotNumber', 'Unknown')}")
             return item
-            
-        # Skip the last image for OCR processing as it typically contains just an ID
-        images_for_ocr = images[:-1] if len(images) > 1 else images
         
-        logger.info(f"Processing {len(images_for_ocr)} images for OCR (excluding last image) for item: {item.get('lotNumber', 'Unknown')}")
+        # Process all images for OCR - may contain important details
+        images_for_ocr = images
+        
+        logger.info(f"Processing {len(images_for_ocr)} images for OCR for item: {item.get('lotNumber', 'Unknown')}")
         
         enhanced_description = item.get('description', '')
         ocr_texts = []
+        brands_found = []
+        model_numbers_found = []
+        
         lot_id = item.get('lotNumber', '').replace(' ', '_').replace('#', '').replace(':', '')
         if not lot_id:
             lot_id = f"unknown_{int(time.time())}"
         
+        # Common brand names to look for
+        common_brands = [
+            'samsung', 'sony', 'apple', 'lg', 'bosch', 'dewalt', 'milwaukee', 
+            'makita', 'craftsman', 'ryobi', 'stanley', 'black and decker', 'black & decker',
+            'kitchenaid', 'whirlpool', 'ge', 'general electric', 'maytag', 'kenmore',
+            'frigidaire', 'philips', 'panasonic', 'toshiba', 'sharp', 'dell', 'hp',
+            'microsoft', 'lenovo', 'asus', 'acer', 'canon', 'nikon', 'sony', 'gopro',
+            'bose', 'sennheiser', 'jbl', 'sonos', 'klipsch', 'polk', 'pioneer',
+            'yamaha', 'denon', 'vizio', 'insignia', 'nintendo', 'playstation', 'xbox',
+            'dyson', 'shark', 'hoover', 'eureka', 'bissell', 'miele', 'roomba', 'irobot',
+            'nutribullet', 'kitchenaid', 'cuisinart', 'ninja', 'breville', 'calphalon',
+            'coleman', 'weber', 'traeger', 'yeti', 'north face', 'patagonia', 'columbia',
+            'nike', 'adidas', 'under armour', 'new balance', 'puma', 'reebok',
+            'levi\'s', 'gap', 'calvin klein', 'ralph lauren', 'gucci', 'coach',
+            'rolex', 'casio', 'citizen', 'seiko', 'timex', 'fossil', 'omega',
+            'lego', 'mattel', 'hasbro', 'fisher price', 'barbie', 'nerf',
+            'ikea', 'ashley', 'la-z-boy', 'ethan allen', 'thomasville', 'bassett'
+        ]
+        
+        # Pattern to identify model numbers
+        model_patterns = [
+            r'model[: ]?([a-z0-9\-]{3,15})',
+            r'part[.: #]?([a-z0-9\-]{3,15})',
+            r'series[: ]?([a-z0-9\-]{2,10})',
+            r'type[: ]?([a-z0-9\-]{2,10})',
+            r'\b([a-z]{1,4}[0-9]{2,6})\b',  # Like SM550 
+            r'\b([a-z]{1,4}-[0-9]{2,6})\b', # Like SM-550
+            r'\b([0-9]{1,4}[a-z]{1,4})\b',  # Like 55HD
+            r'\b(v[0-9]{1,3})\b',           # Like V10, V8
+            r'#\s?([a-z0-9]{5,12})\b',      # Like #AB12345
+            r'sku[: ]?([a-z0-9\-]{4,15})',  
+            r'upc[: ]?([0-9\-]{10,15})',
+            r'ean[: ]?([0-9\-]{10,15})'
+        ]
+        
         async with aiohttp.ClientSession() as session:
-            # First, download and save all images (including the last one)
+            # First, download and save all images
             for i, img_url in enumerate(images):
                 try:
                     logger.debug(f"Downloading image {i+1}/{len(images)}: {img_url}")
@@ -67,41 +105,49 @@ class ImageProcessor:
                     image.save(image_filepath)
                     logger.debug(f"Saved image to {image_filepath}")
                     
-                    # Skip OCR for the last image
-                    if i == len(images) - 1 and len(images) > 1:
-                        logger.debug(f"Skipping OCR for last image (image {i+1})")
-                        continue
-                    
-                    # Process image with OCR
+                    # Process image with OCR using multiple approaches for better results
                     logger.debug(f"Processing image {i+1} with OCR")
                     
-                    # Apply preprocessing to improve OCR results
+                    # Approach 1: Standard processing
                     # Convert to grayscale
-                    image = image.convert('L')
-                    
-                    # Crop the bottom 3% of the image to remove standard text
-                    width, height = image.size
-                    crop_height = int(height * 0.97)  # Remove bottom 3%
-                    cropped_image = image.crop((0, 0, width, crop_height))
-                    
-                    # Save the cropped image
-                    cropped_filepath = generate_image_filepath(lot_id, i+1, "_cropped")
-                    cropped_image.save(cropped_filepath)
+                    gray_image = image.convert('L')
                     
                     # Apply threshold to make text more visible
-                    # Convert to binary image for better OCR
                     threshold = 150
-                    binary_image = cropped_image.point(lambda p: p > threshold and 255)
+                    binary_image = gray_image.point(lambda p: p > threshold and 255)
                     
                     # Extract text using OCR with improved configuration
                     ocr_text = pytesseract.image_to_string(binary_image, config=TESSERACT_CONFIG)
                     
-                    if ocr_text.strip():
+                    # Approach 2: Try with different preprocessing for cases with low contrast
+                    # Adjust contrast to improve text visibility
+                    contrast_enhanced = Image.eval(gray_image, lambda px: min(255, max(0, px * 1.5 - 50)))
+                    ocr_text2 = pytesseract.image_to_string(contrast_enhanced, config=TESSERACT_CONFIG)
+                    
+                    # Combine results
+                    combined_ocr = ocr_text + " " + ocr_text2
+                    
+                    if combined_ocr.strip():
                         # Clean up OCR text - remove extra whitespace, line breaks, etc.
-                        cleaned_text = ' '.join(ocr_text.strip().split())
+                        cleaned_text = ' '.join(combined_ocr.strip().split())
                         
-                        # Filter to only keep alphanumeric characters (a-z, A-Z, 0-9) and basic punctuation
-                        cleaned_text = re.sub(r'[^a-zA-Z0-9\s\.,\-\$%]', '', cleaned_text)
+                        # Keep more punctuation and special characters (might be part of model numbers)
+                        cleaned_text = re.sub(r'[^a-zA-Z0-9\s\.,\-\$%#\/]', ' ', cleaned_text)
+                        
+                        # Look for brand names in OCR text
+                        lower_text = cleaned_text.lower()
+                        for brand in common_brands:
+                            if re.search(r'\b' + re.escape(brand) + r'\b', lower_text):
+                                brands_found.append(brand)
+                                logger.info(f"Found brand in image {i+1}: {brand}")
+                        
+                        # Look for model numbers in OCR text
+                        for pattern in model_patterns:
+                            matches = re.findall(pattern, lower_text, re.IGNORECASE)
+                            for match in matches:
+                                if match and len(match) >= 3:  # Avoid very short matches
+                                    model_numbers_found.append(match)
+                                    logger.info(f"Found potential model number in image {i+1}: {match}")
                         
                         ocr_texts.append(cleaned_text)
                         logger.info(f"Extracted OCR text from image {i+1}: {cleaned_text[:100]}...")
@@ -119,8 +165,10 @@ class ImageProcessor:
             
             combined_ocr = ' '.join(filtered_ocr)
             
-            # Store the raw OCR text
+            # Store the raw OCR text and identified information
             item['ocr_text'] = combined_ocr
+            item['ocr_brands'] = list(set(brands_found))
+            item['ocr_model_numbers'] = list(set(model_numbers_found))
             
             # Create an enhanced description by combining original description with OCR
             # Remove any lot numbers from the enhanced description
@@ -129,12 +177,21 @@ class ImageProcessor:
                 # Remove the lot number part from the description
                 clean_description = re.sub(r'Lot #.*?:', '', clean_description).strip()
             
-            # Combine clean description with OCR text
-            combined_description = f"{clean_description} {combined_ocr}"
+            # First, add the most important information: brands and model numbers
+            important_info = []
+            if brands_found:
+                important_info.append(' '.join(set(brands_found)))
+            if model_numbers_found:
+                important_info.append(' '.join(set(model_numbers_found)))
             
-            # Filter to only keep alphanumeric characters (a-z, A-Z, 0-9) and spaces
-            # This will make the enhanced description more searchable
-            filtered_description = re.sub(r'[^a-zA-Z0-9\s]', ' ', combined_description)
+            # Then add the original description and OCR text
+            if important_info:
+                combined_description = f"{' '.join(important_info)} {clean_description} {combined_ocr}"
+            else:
+                combined_description = f"{clean_description} {combined_ocr}"
+            
+            # Allow more characters (model numbers might have special chars)
+            filtered_description = re.sub(r'[^a-zA-Z0-9\s\.,\-#]', ' ', combined_description)
             # Remove extra spaces
             filtered_description = re.sub(r'\s+', ' ', filtered_description).strip()
             
@@ -148,12 +205,14 @@ class ImageProcessor:
                 # Remove the lot number part from the description
                 clean_description = re.sub(r'Lot #.*?:', '', clean_description).strip()
             
-            # Filter to only keep alphanumeric characters (a-z, A-Z, 0-9) and spaces
-            filtered_description = re.sub(r'[^a-zA-Z0-9\s]', ' ', clean_description)
+            # Allow more characters
+            filtered_description = re.sub(r'[^a-zA-Z0-9\s\.,\-#]', ' ', clean_description)
             # Remove extra spaces
             filtered_description = re.sub(r'\s+', ' ', filtered_description).strip()
                 
             item['enhanced_description'] = filtered_description
+            item['ocr_brands'] = []
+            item['ocr_model_numbers'] = []
             logger.warning("No OCR text extracted from any images")
         
         return item

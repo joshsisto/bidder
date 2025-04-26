@@ -6,6 +6,7 @@ import re
 import traceback
 from bs4 import BeautifulSoup
 
+from config import NETWORK_TIMEOUT
 from utils.logger import setup_logger
 from utils.file_utils import save_html
 
@@ -27,10 +28,16 @@ class ItemExtractor:
         try:
             # Navigate to the item page
             logger.debug(f"Navigating to {url}")
-            await page.goto(url, wait_until="networkidle")
+            try:
+                # Use a longer timeout and domcontentloaded instead of networkidle
+                await page.goto(url, wait_until="domcontentloaded", timeout=NETWORK_TIMEOUT)
+            except Exception as e:
+                logger.warning(f"Primary navigation method failed: {e}, trying alternative...")
+                # Try a fallback approach with a simpler wait strategy
+                await page.goto(url, timeout=NETWORK_TIMEOUT)
             
             # Wait for content to load
-            await page.wait_for_timeout(5000)  # Wait 5 seconds
+            await page.wait_for_timeout(8000)  # Wait 8 seconds for JS to initialize
             
             # Get the page HTML for analysis with BeautifulSoup
             html = await page.content()

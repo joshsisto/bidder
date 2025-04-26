@@ -10,11 +10,16 @@ import asyncio
 import traceback
 import requests
 
-from config import MAX_ITEMS, HOME_IP, AUCTION_URL
+from config import (
+    MAX_ITEMS, HOME_IP, AUCTION_URL, ENABLE_VPN_CHECK, HEADLESS_BROWSER,
+    OBJECT_DETECTION_ENABLED, PRODUCT_SEARCH_ENABLED
+)
 from utils.logger import setup_logger
 from utils.file_utils import save_json, save_html
 from scraper.item_extractor import ItemExtractor
 from scraper.image_processor import ImageProcessor
+from scraper.object_detector import ObjectDetector
+from scraper.product_identifier import ProductIdentifier
 from scraper.price_finder import PriceFinder
 
 # Set up logger
@@ -33,6 +38,7 @@ class AuctionBot:
         self.browser = None
         self.context = None
         self.price_finder = PriceFinder()
+        self.product_identifier = ProductIdentifier()
         
         # Define fallback selectors for different elements
         self.selectors = {
@@ -124,9 +130,9 @@ class AuctionBot:
             self.playwright = await async_playwright().start()
             
             # Launch with chromium (Playwright will download if needed)
-            logger.debug("Launching chromium browser")
+            logger.debug(f"Launching chromium browser (headless: {HEADLESS_BROWSER})")
             self.browser = await self.playwright.chromium.launch(
-                headless=False,  # Set to True in production
+                headless=HEADLESS_BROWSER,  # Use configuration setting
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
@@ -166,6 +172,9 @@ class AuctionBot:
             if self.playwright:
                 logger.debug("Stopping playwright")
                 await self.playwright.stop()
+            
+            # Close any other resources
+            await self.price_finder.close()
         except Exception as e:
             logger.error(f"Error cleaning up browser: {e}")
     
@@ -201,12 +210,15 @@ class AuctionBot:
     
     async def process_all_items(self):
         """Process all items in the auction, one by one"""
-        # Verify VPN is active before proceeding
-        if not self.check_ip_safe():
-            logger.error("VPN check failed. Please ensure your VPN is active and working.")
-            return False
-        
-        logger.info(f"Starting to process auction at {AUCTION_URL} with VPN protection")
+        # Verify VPN is active before proceeding (if enabled)
+        if ENABLE_VPN_CHECK:
+            if not self.check_ip_safe():
+                logger.error("VPN check failed. Please ensure your VPN is active and working.")
+                return False
+            logger.info(f"Starting to process auction at {AUCTION_URL} with VPN protection")
+        else:
+            logger.warning("VPN check is disabled. Proceeding without IP protection.")
+            logger.info(f"Starting to process auction at {AUCTION_URL} without VPN protection")
         
         try:
             # Set up browser
@@ -249,8 +261,18 @@ class AuctionBot:
                         logger.warning(f"Failed to extract details for item at {url}, skipping")
                         continue
                     
-                    # Process item images
+                    # Process item images with OCR
                     item = await ImageProcessor.process_images(item)
+                    
+                    # Enhance with object detection if enabled
+                    if OBJECT_DETECTION_ENABLED:
+                        logger.info(f"Running object detection on images for item {i+1}")
+                        item = await ObjectDetector.enhance_item_with_object_detection(item)
+                    
+                    # Identify product if enabled
+                    if PRODUCT_SEARCH_ENABLED:
+                        logger.info(f"Identifying product details for item {i+1}")
+                        item = await self.product_identifier.identify_product(item)
                     
                     # Add to items list
                     self.items.append(item)
@@ -277,7 +299,7 @@ class AuctionBot:
             # Clean up browser resources
             await self.cleanup_browser()
     
-    def determine_market_prices(self):
+    async def determine_market_prices(self):
         """Determine market prices for all items"""
         logger.info("Starting market price research")
         
@@ -295,16 +317,22 @@ class AuctionBot:
                 
             item['current_bid_float'] = current_bid
             
-            # Get market price
-            market_price = self.price_finder.get_best_market_price(item)
-            item['market_price'] = market_price
-            
-            # Calculate potential profit
-            item['potential_profit'] = market_price - current_bid if market_price > 0 else 0
-            logger.info(f"Potential profit: ${item['potential_profit']:.2f}")
+            # Get market price - this is now an async function
+            try:
+                market_price = await self.price_finder.get_best_market_price(item)
+                item['market_price'] = market_price
+                
+                # Calculate potential profit
+                item['potential_profit'] = market_price - current_bid if market_price > 0 else 0
+                logger.info(f"Potential profit: ${item['potential_profit']:.2f}")
+            except Exception as e:
+                logger.error(f"Error getting market price: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                item['market_price'] = 0.0
+                item['potential_profit'] = 0.0
             
             # Add delay to avoid overloading APIs or getting blocked
-            time.sleep(random.uniform(1, 3))
+            await asyncio.sleep(random.uniform(1, 3))
             
             # Save progress after each item
             save_json(self.items, f"price_progress_{i+1}_of_{len(self.items)}.json")

@@ -6,8 +6,12 @@ import os
 import time
 import asyncio
 import traceback
+import platform
 
-from config import AUCTION_URL, MAX_ITEMS, ENABLE_AMAZON_SEARCH, GOOGLE_API_KEY, GOOGLE_CX, DATA_DIR
+from config import (
+    AUCTION_URL, MAX_ITEMS, ENABLE_AMAZON_SEARCH, GOOGLE_API_KEY, GOOGLE_CX, 
+    DATA_DIR, ENABLE_VPN_CHECK, HEADLESS_BROWSER, TESSERACT_PATH
+)
 from utils.logger import setup_logger
 from scraper.auction_bot import AuctionBot
 from analyzer.report_generator import ReportGenerator
@@ -26,9 +30,13 @@ async def main():
     
     # Display configuration
     print(f"⚙️  Configuration:")
+    print(f"   - Platform: {platform.system()}")
     print(f"   - Max Items: {MAX_ITEMS}")
     print(f"   - Google Search: {'Enabled' if GOOGLE_API_KEY and GOOGLE_CX else 'Disabled (missing API keys)'}")
     print(f"   - Amazon Search: {'Enabled' if ENABLE_AMAZON_SEARCH else 'Disabled'}")
+    print(f"   - VPN Check: {'Enabled' if ENABLE_VPN_CHECK else 'Disabled'}")
+    print(f"   - Browser Mode: {'Headless' if HEADLESS_BROWSER else 'GUI (requires X Server)'}")
+    print(f"   - Tesseract Path: {TESSERACT_PATH}")
     print(f"   - Data Directory: {DATA_DIR}")
     print()
     
@@ -36,13 +44,16 @@ async def main():
     bot = AuctionBot()
     
     try:
-        # Check if IP is safe
-        if not bot.check_ip_safe():
-            logger.error("Aborting due to unsafe IP")
-            print("\n❌ ERROR: VPN check failed. Please enable your VPN before running this script.\n")
-            return
-        
-        print(f"\n✅ VPN check passed! Your IP is protected.\n")
+        # Check if IP is safe (if VPN check is enabled)
+        if ENABLE_VPN_CHECK:
+            if not bot.check_ip_safe():
+                logger.error("Aborting due to unsafe IP")
+                print("\n❌ ERROR: VPN check failed. Please enable your VPN before running this script.\n")
+                return
+            print(f"\n✅ VPN check passed! Your IP is protected.\n")
+        else:
+            logger.warning("VPN check is disabled. Your IP may not be protected.")
+            print("\n⚠️  WARNING: VPN check is disabled. Your IP may not be protected.\n")
         print(f"🔍 Analyzing auction at: {AUCTION_URL}\n")
         
         # Process all items
@@ -57,7 +68,7 @@ async def main():
         
         # Research market prices
         print("💲 Researching market prices... (this may take several minutes)")
-        bot.determine_market_prices()
+        await bot.determine_market_prices()
         
         # Generate report
         print("📊 Generating final report...")

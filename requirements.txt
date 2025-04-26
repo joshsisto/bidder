@@ -15,3 +15,5 @@ beautifulsoup4
 openpyxl
 python-dotenv
 playwright
+opencv-python
+numpy
