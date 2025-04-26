@@ -66,12 +66,14 @@ Instructions:
    - Focus only on the words and numbers that describe the actual item.
 3. Identify Product: Determine the most likely type of product being described (e.g., Laptop, Coffee Maker, Wristwatch, Collectible Figurine, Power Tool).
 4. Extract Key Details: Search the filtered text for specific identifiers:
-   - Brand Name: Look for known manufacturer names (e.g., Apple, Keurig, Seiko, Funko, Milwaukee). If multiple potential brands appear, choose the most likely one associated with the product type. If none is clear, state Unknown.
-   - Model Name/Number: Look for specific model names, model numbers, or series identifiers (e.g., MacBook Air M1, K-Supreme, SKX007, Pop! #54, M18 Fuel). If none is clear, state Unknown.
+   - Brand Name: Look for known manufacturer names (e.g., Apple, Keurig, Seiko, Funko, Milwaukee). If multiple potential brands appear, choose the most likely one associated with the product type. If none is clear, you MUST state "Unknown" (not "unclear" or empty string).
+   - Model Name/Number: Look for specific model names, model numbers, or series identifiers (e.g., MacBook Air M1, K-Supreme, SKX007, Pop! #54, M18 Fuel). If none is clear, you MUST state "Unknown" (not "unclear" or empty string).
    - Other Critical Attributes: Note any other highly relevant details necessary for identification (e.g., Size, Color, Year, Capacity, Part Number) but keep it concise. Omit if not clearly present or essential.
 5. Generate Search Queries: Based only on the reliably identified Brand, Model, and Product Type, formulate concise and effective search query strings suitable for:
    - A general web search (like Google).
    - An e-commerce search (like Amazon). Prioritize Brand + Model + Product Type.
+
+IMPORTANT: When you cannot confidently identify the product, brand, or model (confidence below 70%), you MUST mark it as "Unknown". DO NOT guess at specifics when uncertain. If the input is too vague, marking fields as "Unknown" is the correct response.
 
 Input OCR Text:
 {input_text}
@@ -79,12 +81,12 @@ Input OCR Text:
 Output Format:
 Please provide your analysis STRICTLY in the following JSON format:
 {{
-  "identified_product_type": "Specific type of product identified",
+  "identified_product_type": "Specific type of product identified or Unknown",
   "brand": "Identified Brand Name or Unknown",
   "model_name_number": "Identified Model Name/Number or Unknown",
   "other_relevant_attributes": "Concise list of other key details, or N/A",
-  "google_search_query": "Optimized search string for Google Search",
-  "amazon_search_query": "Optimized search string for Amazon Search"
+  "google_search_query": "Optimized search string for Google Search, or empty string if too uncertain",
+  "amazon_search_query": "Optimized search string for Amazon Search, or empty string if too uncertain"
 }}"""
 
             # Use OpenRouter API to generate queries
@@ -253,18 +255,41 @@ Please provide your analysis STRICTLY in the following JSON format:
                 return {"error": "Invalid JSON in response"}
             
             # Extract the search queries and info
+            product_type = data.get("identified_product_type", "Unknown")
+            brand = data.get("brand", "Unknown")
+            model = data.get("model_name_number", "Unknown")
+            
+            # Flag items where LLM couldn't confidently identify the product
+            insufficient_identification = (
+                product_type in ["Unknown", "unclear", ""] or 
+                brand in ["Unknown", "unclear", ""] or
+                model in ["Unknown", "unclear", ""]
+            )
+            
+            # Check if the item is too generic to be properly identified
+            google_query = data.get("google_search_query", "")
+            amazon_query = data.get("amazon_search_query", "")
+            
+            # If search queries are empty or identical to product/brand, that's a bad sign
+            if not google_query or not amazon_query:
+                insufficient_identification = True
+            
             result = {
-                "product_type": data.get("identified_product_type", "Unknown"),
-                "brand": data.get("brand", "Unknown"),
-                "model": data.get("model_name_number", "Unknown"),
+                "product_type": product_type,
+                "brand": brand,
+                "model": model,
                 "attributes": data.get("other_relevant_attributes", "N/A"),
-                "google_query": data.get("google_search_query", ""),
-                "amazon_query": data.get("amazon_search_query", "")
+                "google_query": google_query,
+                "amazon_query": amazon_query,
+                "insufficient_identification": insufficient_identification
             }
             
-            logger.info(f"LLM identified: {result['brand']} {result['model']} ({result['product_type']})")
-            logger.info(f"Google query: {result['google_query']}")
-            logger.info(f"Amazon query: {result['amazon_query']}")
+            if insufficient_identification:
+                logger.warning(f"LLM couldn't confidently identify item: {brand} {model} ({product_type})")
+            else:
+                logger.info(f"LLM identified: {result['brand']} {result['model']} ({result['product_type']})")
+                logger.info(f"Google query: {result['google_query']}")
+                logger.info(f"Amazon query: {result['amazon_query']}")
             
             return result
             

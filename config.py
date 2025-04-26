@@ -30,7 +30,7 @@ HEADLESS_BROWSER = os.getenv('HEADLESS_BROWSER', 'True').lower() in ('true', '1'
 MAX_ITEMS = 100  # Maximum number of items to process
 NETWORK_TIMEOUT = int(os.getenv('NETWORK_TIMEOUT', '60000'))  # Network timeout in milliseconds
 # AUCTION_URL = "https://www.bidrl.com/auction/high-end-auctions-9415-madison-ave-orangevale-ca-95662-april-25th-173079/bidgallery/perpage_NjA"
-AUCTION_URL = "https://www.bidrl.com/auction/highend-auction-212-harding-blvd-ste-g-roseville-ca-95678-may-2nd-173431/bidgallery/"
+AUCTION_URL = "https://www.bidrl.com/auction/highend-auction-212-harding-blvd-ste-g-roseville-ca-95678-may-2nd-173431/bidgallery/page_NQ"
 
 # Search configuration
 ENABLE_AMAZON_SEARCH = os.getenv('ENABLE_AMAZON_SEARCH', 'False').lower() in ('true', '1', 't')

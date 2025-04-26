@@ -452,6 +452,13 @@ class PriceFinder:
                             'attributes': llm_results.get('attributes', 'N/A')
                         }
                         
+                        # Check if the item should be skipped due to insufficient identification
+                        if llm_results.get('insufficient_identification', False):
+                            logger.warning(f"Item {item.get('lotNumber', 'Unknown')} has insufficient LLM identification, marking to skip")
+                            item['skip_for_processing'] = True
+                            # Skip the rest of price finding for this item
+                            return 0.0
+                        
                         # Get the generated search queries
                         google_query = llm_results.get('google_query')
                         amazon_query = llm_results.get('amazon_query')
